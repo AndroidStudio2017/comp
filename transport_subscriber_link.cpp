@@ -38,29 +38,17 @@
 
 #include <boost/bind.hpp>
 
-// 加入随机数头文件
-#include <sys/time.h>
-#include <time.h>
-#include <stdlib.h>
-
-// 队列头文件
-#include <queue>
-
-#include <string.h>
-
-
 namespace ros
 {
 
 TransportSubscriberLink::TransportSubscriberLink()
 : writing_message_(false)
 , header_written_(false)
-, queue_full_(false)
+, dec_(1)
+, cur_(0)
+, pos_(0)
 {
-  // Changed by Johnson
-  // 设置用户函数指针为空
-  // user_callback_.clear();
-  ROS_INFO("NOTICE! This is the ORB version!");
+  std::cout << "NOTE: This is a modified version of TransportSubscriberLink!" << std::endl;
 }
 
 TransportSubscriberLink::~TransportSubscriberLink()
@@ -155,29 +143,9 @@ void TransportSubscriberLink::onHeaderWritten(const ConnectionPtr& conn)
   startMessageWrite(true);
 }
 
-// Changed by Johnson
-// 
-// 2020.02.16 11:31
-// 设置用户回调函数
-void TransportSubscriberLink::setUserCb(boost::function<void()> callback) {
-  user_callback_ = callback;
-}
-// end
-
 void TransportSubscriberLink::onMessageWritten(const ConnectionPtr& conn)
 {
   (void)conn;
-
-  // Changed by Johnson
-  // 
-  // 2020.02.13 15:22
-  // 检测用户回调函数
-  if (!user_callback_.empty()) {
-//    std::cout << "You have called user_callback." << std::endl;
-    user_callback_();
-  }
-  // end
-
   writing_message_ = false;
   startMessageWrite(true);
 }
@@ -199,6 +167,9 @@ void TransportSubscriberLink::startMessageWrite(bool immediate_write)
       writing_message_ = true;
       m = outbox_.front();
       outbox_.pop();
+      pos_--;
+      if (pos_ < 0)
+        pos_ = 0;
     }
   }
 
@@ -212,39 +183,65 @@ void TransportSubscriberLink::enqueueMessage(const SerializedMessage& m, bool se
 {
   (void)nocopy;
   if (!ser)
-  {
     return;
-  }
 
   {
     boost::mutex::scoped_lock lock(outbox_mutex_);
-
+    
+    // gather infomation
     int max_queue = 0;
     if (PublicationPtr parent = parent_.lock())
-    {
       max_queue = parent->getMaxQueue();
+    int size = (int)outbox_.size();
+
+    // try if decrease decimate level
+    if (dec_ > 1 && size * 3 <= max_queue * 2) {
+      dec_ = (dec_ >> 1);
+      if (cur_ >= dec_)
+        cur_ -= dec_;
     }
 
+    // decimate
+    cur_++;
+    if (cur_ != dec_)
+      return;
+
+    // if queue is full, select a message to eliminate
     ROS_DEBUG_NAMED("superdebug", "TransportSubscriberLink on topic [%s] to caller [%s], queueing message (queue size [%d])", topic_.c_str(), destination_caller_id_.c_str(), (int)outbox_.size());
-
-    if (max_queue > 0 && (int)outbox_.size() >= max_queue)
-    {
-      if (!queue_full_)
-      {
-        ROS_DEBUG("Outgoing queue full for topic [%s].  "
-               "Discarding oldest message\n",
-               topic_.c_str());
+    if (max_queue > 0 && size >= max_queue) {
+      std::queue<SerializedMessage> tmpbox;
+      for (int i = 0; i < size; i++) {
+        if (i != pos_)
+          tmpbox.push(outbox_.front());
+        outbox_.pop();
       }
-
-      outbox_.pop(); // toss out the oldest thing in the queue to make room for us
-      queue_full_ = true;
+      outbox_ = tmpbox;
+      // adjust the next position of message to be eliminate
+      pos_++;
+      if (pos_ >= max_queue) {
+        dec_ = (dec_ << 1);
+        pos_ = 0;
+      }
+      //std::cout << "size of outbox_ is : " << outbox_.size() << ", max_queue is : " << max_queue << std::endl;
+      // std::cout << "after assignment, size of outbox_ is : " << outbox_.size() << ", max_queue is : " << max_queue << std::endl;
     }
-    else
-    {
-      queue_full_ = false;
-    }
-
+    // enqueue the message
     outbox_.push(m);
+    cur_ = 0;
+#if 1
+    
+      size = outbox_.size();
+      std::queue<SerializedMessage> tmpbox;
+      for (int i = 0; i < size; i++) {
+        std::cout << *(int*)(&outbox_.front().buf[4]) << ",";
+        tmpbox.push(outbox_.front());
+        outbox_.pop();
+      }
+      //std::cout << "size = " << size;
+       std::cout << std::endl;
+      outbox_ = tmpbox;
+#endif
+    
   }
 
   startMessageWrite(false);
